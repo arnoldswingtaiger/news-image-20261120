@@ -1,472 +1,246 @@
 #!/usr/bin/env python3
-"""news-image-20261120: draw one image summing up the world news of
-Friday 20 November 2026, and write it to /output/entry.png.
+"""Summarise Friday 20 November 2026's world news in a single image.
 
-Pure Python 3 standard library (zlib, struct, os, math): the grader runs
-with no network and nothing installed, so the PNG encoder and a 5x7 bitmap
-font are built in here. Deterministic: no clock, no randomness, no input
-files -- two runs write the same bytes.
+Draws a newspaper front page (1024x1024 PNG) covering the day's lead story,
+six further stories and a ticker of briefs. The output is fully
+deterministic: fixed fonts, fixed layout, no network, no clock, no random
+input, so running the program twice produces byte-identical PNG files.
+
+Usage:
+    python3 main.py            # writes /output/entry.png
 """
 
-import math
 import os
-import struct
-import zlib
+import textwrap
 
-W, H = 1024, 1024
+from PIL import Image, ImageDraw, ImageFont
 
-# --- palette ---------------------------------------------------------------
-PAPER = (250, 247, 239)   # warm newsprint
-INK = (20, 24, 32)        # near-black text
-NAVY = (14, 30, 58)       # masthead band
-RED = (172, 32, 32)       # rules, lead tag
-GOLD = (198, 160, 38)     # date line, accents
-CARD = (255, 255, 255)    # story cards
-GREY = (102, 108, 116)    # footer, captions
-LINE = (203, 196, 182)    # hairlines
-STORM = (96, 122, 148)    # cyclone sky
-TEAL = (13, 112, 106)     # tag: justice / society
-BLUE = (28, 88, 164)      # tag: diplomacy
-PURPLE = (100, 62, 146)   # tag: markets / tech
-GREEN = (44, 122, 48)     # tag: politics
-ORANGE = (192, 92, 18)    # tag: weather
-BROWN = (118, 80, 40)     # tag: climate
-DARKRED = (140, 28, 28)   # tag: conflict
+# ---------------------------------------------------------------- constants
 
-# --- canvas ----------------------------------------------------------------
-px = bytearray(W * H * 3)
+WIDTH, HEIGHT = 1024, 1024
+OUT_PATH = "/output/entry.png"
+
+PAPER = (247, 243, 234)      # warm newsprint
+INK = (18, 18, 18)           # near-black text
+RED = (178, 34, 34)          # kicker / accent red
+NAVY = (28, 58, 96)          # cyclone art + ticker band
+GREY = (96, 92, 84)          # secondary text
+RULE = (18, 18, 18)
+CARD_BG = (255, 255, 255)
+
+MARGIN = 36
+
+FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
 
-def fill(color):
-    px[:] = bytes(color) * (W * H)
+def load_font(name, size):
+    """Load a DejaVu font, falling back to Pillow's built-in bitmap font."""
+    path = os.path.join(FONT_DIR, name)
+    try:
+        return ImageFont.truetype(path, size)
+    except OSError:
+        return ImageFont.load_default()
 
 
-def rect(x, y, w, h, color):
-    """Filled rectangle, clipped to the canvas."""
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(W, x + w)
-    y1 = min(H, y + h)
-    if x1 <= x0 or y1 <= y0:
-        return
-    row = bytes(color) * (x1 - x0)
-    for yy in range(y0, y1):
-        o = (yy * W + x0) * 3
-        px[o:o + len(row)] = row
+MASTHEAD_FONT = load_font("DejaVuSerif-Bold.ttf", 80)
+DATE_FONT = load_font("DejaVuSans-Bold.ttf", 21)
+KICKER_FONT = load_font("DejaVuSans-Bold.ttf", 19)
+HEADLINE_FONT = load_font("DejaVuSerif-Bold.ttf", 46)
+DECK_FONT = load_font("DejaVuSerif.ttf", 23)
+CARD_KICKER_FONT = load_font("DejaVuSans-Bold.ttf", 16)
+CARD_HEAD_FONT = load_font("DejaVuSerif-Bold.ttf", 23)
+TICKER_FONT = load_font("DejaVuSans-Bold.ttf", 18)
+FOOTER_FONT = load_font("DejaVuSans.ttf", 16)
+CAPTION_FONT = load_font("DejaVuSans.ttf", 15)
 
 
-def circle(cx, cy, r, color):
-    for dy in range(-r, r + 1):
-        dx = int(math.sqrt(max(0, r * r - dy * dy)))
-        rect(cx - dx, cy + dy, 2 * dx + 1, 1, color)
+# ------------------------------------------------------------------- helpers
 
-
-def ring(cx, cy, r, color, thick=3):
-    """Circle outline of the given thickness."""
-    for dy in range(-r - thick, r + thick + 1):
-        for dx in range(-r - thick, r + thick + 1):
-            d = math.sqrt(dx * dx + dy * dy)
-            if r - thick / 2 <= d <= r + thick / 2:
-                rect(cx + dx, cy + dy, 1, 1, color)
-
-
-def tri(x1, y1, x2, y2, x3, y3, color):
-    """Filled triangle, scanline fill."""
-    pts = sorted(((x1, y1), (x2, y2), (x3, y3)), key=lambda p: p[1])
-    (ax, ay), (bx, by), (cx, cy) = pts
-    if ay == cy:
-        return
-    for y in range(max(0, ay), min(H, cy + 1)):
-        xs = []
-        for (px1, py1), (px2, py2) in (((ax, ay), (bx, by)),
-                                       ((bx, by), (cx, cy)),
-                                       ((ax, ay), (cx, cy))):
-            if py2 != py1 and py1 <= y <= py2:
-                xs.append(px1 + (px2 - px1) * (y - py1) / (py2 - py1))
-            elif py2 != py1 and py2 <= y <= py1:
-                xs.append(px2 + (px1 - px2) * (y - py2) / (py1 - py2))
-        if len(xs) >= 2:
-            xa, xb = int(min(xs)), int(max(xs))
-            rect(xa, y, xb - xa + 1, 1, color)
-
-
-def line(x1, y1, x2, y2, color, thick=1):
-    n = max(abs(x2 - x1), abs(y2 - y1), 1)
-    for i in range(n + 1):
-        x = int(x1 + (x2 - x1) * i / n)
-        y = int(y1 + (y2 - y1) * i / n)
-        rect(x - thick // 2, y - thick // 2, thick, thick, color)
-
-
-# --- PNG encoder (stdlib only) ---------------------------------------------
-def _chunk(typ, data):
-    return (struct.pack(">I", len(data)) + typ + data +
-            struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
-
-
-def encode_png():
-    raw = bytearray()
-    for y in range(H):
-        raw.append(0)  # filter: none
-        raw += px[y * W * 3:(y + 1) * W * 3]
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) +
-            _chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + _chunk(b"IEND", b""))
-
-
-# --- 5x7 bitmap font -------------------------------------------------------
-# Each glyph is 7 rows of 5 pixels ('#' on, '.' off).
-FONT_UPPER = {
-    'A': (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
-    'B': ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
-    'C': (".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."),
-    'D': ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
-    'E': ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
-    'F': ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
-    'G': (".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###."),
-    'H': ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
-    'I': (".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
-    'J': ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
-    'K': ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
-    'L': ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
-    'M': ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
-    'N': ("#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"),
-    'O': (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
-    'P': ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
-    'Q': (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
-    'R': ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
-    'S': (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
-    'T': ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
-    'U': ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
-    'V': ("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
-    'W': ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
-    'X': ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
-    'Y': ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
-    'Z': ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
-}
-FONT_DIGITS = {
-    '0': (".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."),
-    '1': ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
-    '2': (".###.", "#...#", "....#", "..##.", ".#...", "#....", "#####"),
-    '3': ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
-    '4': ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
-    '5': ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
-    '6': (".###.", "#...#", "#....", "####.", "#...#", "#...#", ".###."),
-    '7': ("#####", "....#", "...#.", "...#.", "..#..", "..#..", "..#.."),
-    '8': (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
-    '9': (".###.", "#...#", "#...#", ".####", "....#", "#...#", ".###."),
-}
-FONT_LOWER = {
-    'a': (".....", ".....", ".###.", "....#", ".####", "#...#", ".####"),
-    'b': ("#....", "#....", "####.", "#...#", "#...#", "#...#", "####."),
-    'c': (".....", ".....", ".###.", "#...#", "#....", "#...#", ".###."),
-    'd': ("....#", "....#", ".####", "#...#", "#...#", "#...#", ".####"),
-    'e': (".....", ".....", ".###.", "#...#", "#####", "#....", ".###."),
-    'f': ("..##.", ".#..#", ".#...", "####.", ".#...", ".#...", ".#..."),
-    'g': (".....", ".####", "#...#", "#...#", ".####", "....#", ".###."),
-    'h': ("#....", "#....", "####.", "#...#", "#...#", "#...#", "#...#"),
-    'i': (".....", "..#..", ".....", ".##..", "..#..", "..#..", ".###."),
-    'j': (".....", "...#.", ".....", "..##.", "...#.", "...#.", "##.#."),
-    'k': ("#....", "#....", "#..#.", "#.#..", "##...", "#.#..", "#..#."),
-    'l': (".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
-    'm': (".....", ".....", "##.#.", "#.#.#", "#.#.#", "#.#.#", "#.#.#"),
-    'n': (".....", ".....", "####.", "#...#", "#...#", "#...#", "#...#"),
-    'o': (".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###."),
-    'p': (".....", ".....", "####.", "#...#", "#...#", "####.", "#...."),
-    'q': (".....", ".....", ".####", "#...#", "#...#", ".####", "....#"),
-    'r': (".....", ".....", "#.##.", "##..#", "#....", "#....", "#...."),
-    's': (".....", ".....", ".####", "#....", ".###.", "....#", "####."),
-    't': (".#...", ".#...", "####.", ".#...", ".#...", ".#...", "..##."),
-    'u': (".....", ".....", "#...#", "#...#", "#...#", "#..##", ".##.#"),
-    'v': (".....", ".....", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
-    'w': (".....", ".....", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#."),
-    'x': (".....", ".....", "#...#", ".#.#.", "..#..", ".#.#.", "#...#"),
-    'y': (".....", ".....", "#...#", "#...#", "#...#", ".####", "....#"),
-    'z': (".....", ".....", "#####", "...#.", "..#..", ".#...", "#####"),
-}
-FONT_PUNCT = {
-    ' ': (".....", ".....", ".....", ".....", ".....", ".....", "....."),
-    '.': (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
-    ',': (".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
-    ':': (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
-    ';': (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
-    '!': ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
-    '?': (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
-    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
-    '"': (".#.#.", ".#.#.", ".#.#.", ".....", ".....", ".....", "....."),
-    '-': (".....", ".....", ".....", "#####", ".....", ".....", "....."),
-    '(': ("...#.", "..#..", "..#..", "..#..", "..#..", "..#..", "...#."),
-    ')': (".#...", "..#..", "..#..", "..#..", "..#..", "..#..", ".#..."),
-    '/': ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
-    '%': ("##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"),
-    '&': (".##..", "#..#.", "#..#.", ".#...", "#.##.", "#..#.", ".##.#"),
-    '+': (".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."),
-    '*': (".....", ".#.#.", "..#..", "#####", "..#..", ".#.#.", "....."),
-    '=': (".....", ".....", "#####", ".....", "#####", ".....", "....."),
-    '#': (".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."),
-    '@': (".###.", "#...#", "#.###", "#.#.#", "#.##.", "#....", ".###."),
-    '$': ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
-    '<': ("...#.", "..#..", ".#...", "#....", ".#...", "..#..", "...#."),
-    '>': (".#...", "..#..", "...#.", "....#", "...#.", "..#..", ".#..."),
-    '_': (".....", ".....", ".....", ".....", ".....", ".....", "#####"),
-    '[': (".###.", ".#...", ".#...", ".#...", ".#...", ".#...", ".###."),
-    ']': (".###.", "...#.", "...#.", "...#.", "...#.", "...#.", ".###."),
-    '·': (".....", ".....", ".....", ".##..", ".##..", ".....", "....."),
-    '•': (".....", ".....", ".....", ".##..", ".##..", ".....", "....."),
-    '–': (".....", ".....", ".....", "#####", ".....", ".....", "....."),
-    '—': (".....", ".....", ".....", "#####", ".....", ".....", "....."),
-}
-FONT = {}
-FONT.update(FONT_UPPER)
-FONT.update(FONT_DIGITS)
-FONT.update(FONT_LOWER)
-FONT.update(FONT_PUNCT)
-BLANK = FONT[' ']
-
-
-# --- text ------------------------------------------------------------------
-def text_w(s, scale):
-    return len(s) * 6 * scale - scale
-
-
-def draw_text(x, y, s, scale, fg, bg):
-    """Draw string s at (x, y), top-left, on a solid bg colour."""
-    fgc = bytes(fg)
-    bgc = bytes(bg)
-    cx = x
-    for ch in s:
-        g = FONT.get(ch, BLANK)
-        for row in range(7):
-            bits = g[row]
-            seg = bytearray()
-            for col in range(5):
-                seg += fgc * scale if bits[col] == '#' else bgc * scale
-            seg += bgc * scale  # one column of letter spacing
-            for sy in range(scale):
-                yy = y + row * scale + sy
-                if 0 <= yy < H:
-                    o = (yy * W + cx) * 3
-                    px[o:o + len(seg)] = seg
-        cx += 6 * scale
-
-
-def wrap(s, scale, max_w):
-    """Greedy word wrap; returns a list of lines."""
-    words = s.split(' ')
-    lines, cur = [], ''
-    for word in words:
-        trial = word if not cur else cur + ' ' + word
-        if text_w(trial, scale) <= max_w or not cur:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+def wrap(draw, text, font, max_width):
+    """Greedy word-wrap of `text` so every line fits within `max_width`."""
+    lines = []
+    for paragraph in text.split("\n"):
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            trial = (current + " " + word).strip()
+            if draw.textlength(trial, font=font) <= max_width:
+                current = trial
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
     return lines
 
 
-def draw_para(x, y, s, scale, fg, bg, max_w, leading=None):
-    """Draw a wrapped paragraph; returns the y just below it."""
-    lh = leading if leading is not None else 7 * scale + 4
-    for ln in wrap(s, scale, max_w):
-        draw_text(x, y, ln, scale, fg, bg)
-        y += lh
+def draw_lines(draw, lines, font, x, y, fill, leading):
+    """Draw wrapped lines top-down, returning the y below the last line."""
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=fill)
+        y += leading
     return y
 
 
-def center_text(y, s, scale, fg, bg, cx=W // 2):
-    draw_text(cx - text_w(s, scale) // 2, y, s, scale, fg, bg)
+def rule(draw, x0, y, x1, width=2, fill=RULE):
+    """A horizontal rule from x0 to x1 at height y."""
+    draw.line([(x0, y), (x1, y)], fill=fill, width=width)
 
 
-# --- icons (each draws inside a 56x56 box at x, y) --------------------------
-def icon_scales(x, y):
-    """Justice: a pair of scales."""
-    rect(x + 27, y + 6, 2, 34, INK)               # post
-    rect(x + 10, y + 6, 36, 3, INK)               # beam
-    tri(x + 10, y + 9, x + 24, y + 9, x + 17, y + 22, INK)   # left pan hanger
-    tri(x + 32, y + 9, x + 46, y + 9, x + 39, y + 22, INK)   # right pan hanger
-    rect(x + 8, y + 22, 18, 3, TEAL)              # left pan
-    rect(x + 30, y + 22, 18, 3, TEAL)             # right pan
-    rect(x + 22, y + 40, 12, 3, INK)              # base
-    rect(x + 16, y + 43, 24, 4, INK)
+def cyclone(draw, cx, cy, radius, colour):
+    """A simple spiral storm: a few spaced arcs that tighten to the eye."""
+    steps = 14
+    for i in range(steps):
+        t = i / steps
+        r = radius * (1.0 - t * 0.75)
+        start = 90 + 260 * t
+        end = start + 200
+        box = [cx - r, cy - r, cx + r, cy + r]
+        draw.arc(box, start=start, end=end, fill=colour, width=3)
+    draw.ellipse([cx - 9, cy - 9, cx + 9, cy + 9], outline=colour, width=3)
 
 
-def icon_chart(x, y):
-    """Markets: rising bars and an arrow."""
-    rect(x + 8, y + 34, 7, 16, PURPLE)
-    rect(x + 19, y + 26, 7, 24, PURPLE)
-    rect(x + 30, y + 18, 7, 32, PURPLE)
-    rect(x + 41, y + 10, 7, 40, GREEN)
-    line(x + 6, y + 8, x + 50, y + 2, GREEN, 2)
-    tri(x + 50, y + 2, x + 42, y + 0, x + 44, y + 9, GREEN)
+# --------------------------------------------------------------------- data
 
+MASTHEAD = "WORLD NEWS"
+DATELINE = "FRIDAY 20 NOVEMBER 2026"
 
-def icon_tower(x, y):
-    """Conflict: a tower struck by a missile trail."""
-    rect(x + 22, y + 8, 12, 40, (90, 96, 106))    # tower
-    rect(x + 18, y + 14, 20, 4, (70, 76, 86))
-    rect(x + 18, y + 24, 20, 4, (70, 76, 86))
-    rect(x + 18, y + 34, 20, 4, (70, 76, 86))
-    rect(x + 26, y + 2, 4, 6, (70, 76, 86))       # spire
-    circle(x + 28, y + 6, 3, GOLD)                # impact flash
-    line(x + 44, y + 4, x + 30, y + 8, DARKRED, 2)  # missile trail
-    line(x + 48, y + 12, x + 34, y + 12, DARKRED, 2)
-    rect(x + 6, y + 48, 44, 4, (70, 76, 86))      # ground
+LEAD_KICKER = "LEAD STORY  —  INDIA"
+LEAD_HEADLINE = "Cyclone Akvan slams into\nIndia's east coast"
+LEAD_DECK = (
+    "More than 300,000 people were evacuated near Gopalpur as winds "
+    "gusted to 110 km/h and the storm made landfall. 69 trains were "
+    "cancelled across the region."
+)
+LEAD_CAPTION = "GOPALPUR, ODISHA"
 
-
-def icon_leaf(x, y):
-    """Climate: a leaf over a globe."""
-    circle(x + 28, y + 30, 18, (64, 120, 200))    # globe
-    circle(x + 24, y + 26, 6, GREEN)              # land
-    circle(x + 34, y + 34, 5, GREEN)
-    rect(x + 20, y + 30, 16, 3, (64, 120, 200))
-    # leaf
-    tri(x + 28, y + 2, x + 44, y + 12, x + 28, y + 18, GREEN)
-    tri(x + 28, y + 2, x + 12, y + 12, x + 28, y + 18, (60, 140, 60))
-    line(x + 28, y + 4, x + 28, y + 18, (30, 90, 30), 1)
-
-
-def icon_stars(x, y):
-    """Diplomacy: a ring of stars on blue."""
-    rect(x + 4, y + 4, 48, 48, (0, 51, 153))
-    for k in range(12):
-        a = math.radians(k * 30)
-        dx = 28 + int(15 * math.cos(a))
-        dy = 28 + int(15 * math.sin(a))
-        rect(x + dx - 1, y + dy - 1, 3, 3, GOLD)
-
-
-def icon_hourglass(x, y):
-    """Politics: an hourglass — a decision put off."""
-    tri(x + 10, y + 6, x + 46, y + 6, x + 28, y + 24, INK)
-    tri(x + 10, y + 50, x + 46, y + 50, x + 28, y + 26, INK)
-    rect(x + 8, y + 4, 40, 3, INK)
-    rect(x + 8, y + 49, 40, 3, INK)
-    circle(x + 28, y + 20, 4, GOLD)
-    circle(x + 28, y + 34, 2, GOLD)
-
-
-def draw_lead_art(x, y, w, h):
-    """Cyclone Akvan over India's east coast: spiral bands, the eye,
-    a coastline with waves below, rain streaks."""
-    rect(x, y, w, h, STORM)
-    # spiral cloud bands around the eye
-    ex, ey = x + w // 2, y + 88
-    for r, col in ((78, (226, 232, 238)), (62, (200, 210, 220)),
-                   (46, (226, 232, 238)), (30, (200, 210, 220))):
-        ring(ex, ey, r, col, 9)
-    circle(ex, ey, 14, (240, 244, 248))           # the calm eye
-    # spiral arms sweeping out
-    for k in range(8):
-        a = math.radians(k * 45 + 20)
-        ax = ex + int(84 * math.cos(a))
-        ay = ey + int(84 * math.sin(a))
-        circle(ax, ay, 10, (226, 232, 238))
-    # coastline: land bottom-right, sea bottom-left
-    for dx in range(0, w):
-        edge = y + h - 46 - int(26 * math.sin(dx / 34.0))
-        rect(x + dx, edge, 1, y + h - edge, (46, 92, 58))
-    # beach line
-    for dx in range(0, w, 4):
-        edge = y + h - 46 - int(26 * math.sin(dx / 34.0))
-        rect(x + dx, edge - 3, 4, 3, (214, 196, 150))
-    # waves in the sea
-    for wy in (y + h - 34, y + h - 22, y + h - 12):
-        for wx in range(0, 150, 24):
-            line(x + wx, wy, x + wx + 12, wy - 4, CARD, 2)
-    # rain streaks
-    for rx in range(8, w, 26):
-        line(x + rx, y + 8, x + rx - 6, y + 30, (180, 196, 210), 2)
-    # town dots on the coast
-    for tx, ty in ((210, y + h - 58), (238, y + h - 66), (262, y + h - 52)):
-        rect(tx, ty, 4, 4, GOLD)
-
-
-# --- the day's news (Friday 20 November 2026) -------------------------------
-LEAD = {
-    "tag": "INDIA · WEATHER",
-    "color": ORANGE,
-    "headline": "CYCLONE AKVAN SLAMS INTO INDIA",
-    "body": ("More than 300,000 people evacuated as the severe storm crosses "
-             "the Odisha-Andhra Pradesh coast near Gopalpur, with winds "
-             "gusting to 110 km/h and 69 trains cancelled."),
-}
 CARDS = [
-    {"tag": "UNITED STATES · IRAN", "color": GREEN, "icon": icon_hourglass,
-     "headline": "TRUMP DEFERS IRAN DECISION",
-     "body": ("The president says he is 'not rushing' new strikes and will "
-              "decide after 1 January, as Iran widens attacks on Gulf shipping.")},
-    {"tag": "JUSTICE · THE HAGUE", "color": TEAL, "icon": icon_scales,
-     "headline": "MYANMAR GUILTY OF GENOCIDE",
-     "body": ("The UN court rules Myanmar committed genocide against the "
-              "Rohingya in 2017, its first such finding against a state.")},
-    {"tag": "MARKETS · TECHNOLOGY", "color": PURPLE, "icon": icon_chart,
-     "headline": "ANTHROPIC SOARS IN RECORD IPO",
-     "body": ("The AI firm's shares jump 17% on their first day in the "
-              "biggest listing on record, even as the S&P 500 falls 2%.")},
-    {"tag": "MIDDLE EAST · CONFLICT", "color": DARKRED, "icon": icon_tower,
-     "headline": "MISSILE HITS RIYADH TOWER",
-     "body": ("A Houthi missile strikes Riyadh's tallest tower, and a tanker "
-              "catches fire after hitting a mine east of the Strait of Hormuz.")},
-    {"tag": "CLIMATE · ANTALYA", "color": BROWN, "icon": icon_leaf,
-     "headline": "COP31 ENDS, NO FUEL PLEDGE",
-     "body": ("The UN climate talks close with a 144-paragraph draft and the "
-              "fossil-fuel reference dropped from the final text.")},
-    {"tag": "EUROPE · UKRAINE", "color": BLUE, "icon": icon_stars,
-     "headline": "EUROPE READY FOR RUSSIA TALKS",
-     "body": ("Ukraine's European allies meet in Berlin and say they hold a "
-              "united position for negotiations; Putin invites them to Moscow.")},
+    ("WASHINGTON",
+     "Trump defers the Iran decision to next year"),
+    ("THE HAGUE",
+     "ICJ rules Myanmar committed genocide against the Rohingya"),
+    ("WALL STREET",
+     "Anthropic soars 17% in record IPO as S&P 500 falls 2%"),
+    ("ANTALYA",
+     "COP31 ends with no fossil-fuel pledge"),
+    ("EUROPE",
+     "Europe ready for Russia talks"),
+    ("MIDDLE EAST",
+     "Houthi missile hits Riyadh's tallest tower; tanker mine fire off Hormuz"),
 ]
-TICKER = ("ALSO TODAY: Ukraine hits the Crimean Bridge a third time in "
-          "four days • Kyiv hit by four ballistic missiles • Migrant boat "
-          "sinks off Senegal • Van Gogh sells for a record $190.4m • "
-          "GTA VI rollout continues")
-FOOTER = ("Compiled from public news reports · All events of Friday, "
-          "20 November 2026")
+
+TICKER_ITEMS = [
+    "Crimean Bridge hit a third time",
+    "Kyiv hit by four ballistic missiles",
+    "Migrant boat sinks off Senegal",
+    "Van Gogh sells for a record $190.4m",
+    "GTA VI rollout continues",
+]
+
+FOOTER = "WORLD NEWS  •  FRIDAY 20 NOVEMBER 2026  •  THE WHOLE DAY IN ONE IMAGE"
 
 
-def draw_card(x, y, w, h, card):
-    rect(x, y, w, h, LINE)
-    rect(x + 2, y + 2, w - 4, h - 4, CARD)
-    draw_text(x + 14, y + 12, card["tag"], 2, card["color"], CARD)
-    card["icon"](x + w - 68, y + 12)
-    draw_para(x + 14, y + 32, card["headline"], 3, INK, CARD, w - 28 - 70)
-    draw_para(x + 14, y + 96, card["body"], 2, INK, CARD, w - 28)
+# -------------------------------------------------------------------- render
 
+def render():
+    img = Image.new("RGB", (WIDTH, HEIGHT), PAPER)
+    draw = ImageDraw.Draw(img)
+    right = WIDTH - MARGIN
 
-def draw_page():
-    fill(PAPER)
-    # masthead
-    rect(0, 0, W, 126, NAVY)
-    rect(0, 122, W, 4, GOLD)
-    center_text(14, "WORLD NEWS", 7, (255, 255, 255), NAVY)
-    center_text(72, "FRIDAY · 20 NOVEMBER 2026", 4, GOLD, NAVY)
-    rect(0, 126, W, 6, RED)
-    # lead story
-    draw_text(28, 146, LEAD["tag"], 2, LEAD["color"], PAPER)
-    draw_para(28, 168, LEAD["headline"], 4, INK, PAPER, 652)
-    draw_para(28, 246, LEAD["body"], 3, INK, PAPER, 652)
-    draw_lead_art(700, 142, 296, 230)
-    # divider
-    rect(28, 384, 968, 2, LINE)
-    # story cards: 2 columns x 3 rows
-    cw, ch, gx, gy = 472, 170, 16, 12
-    for i, card in enumerate(CARDS):
-        cx = 28 + (i % 2) * (cw + gx)
-        cy = 398 + (i // 2) * (ch + gy)
-        draw_card(cx, cy, cw, ch, card)
-    # ticker + footer
-    draw_para(28, 944, TICKER, 2, INK, PAPER, 968)
-    center_text(1004, FOOTER, 2, GREY, PAPER)
+    # --- masthead ------------------------------------------------------
+    y = 24
+    rule(draw, MARGIN, y, right, width=2)
+    y += 10
+    title_w = draw.textlength(MASTHEAD, font=MASTHEAD_FONT)
+    draw.text(((WIDTH - title_w) / 2, y), MASTHEAD, font=MASTHEAD_FONT, fill=INK)
+    y += 96
+    date_w = draw.textlength(DATELINE, font=DATE_FONT)
+    draw.text(((WIDTH - date_w) / 2, y), DATELINE, font=DATE_FONT, fill=RED)
+    y += 30
+    rule(draw, MARGIN, y, right, width=6)
+    y += 8
+    rule(draw, MARGIN, y, right, width=2)
+
+    # --- lead story ----------------------------------------------------
+    y += 14
+    draw.text((MARGIN, y), LEAD_KICKER, font=KICKER_FONT, fill=RED)
+    y += 26
+    head_lines = wrap(draw, LEAD_HEADLINE, HEADLINE_FONT, WIDTH - 2 * MARGIN)
+    y = draw_lines(draw, head_lines, HEADLINE_FONT, MARGIN, y, INK, 50)
+
+    # Deck on the left, cyclone artwork on the right.
+    y += 12
+    art_w = 250
+    art_x0 = right - art_w
+    deck_w = art_x0 - MARGIN - 24
+    deck_lines = wrap(draw, LEAD_DECK, DECK_FONT, deck_w)
+    draw_lines(draw, deck_lines, DECK_FONT, MARGIN, y, INK, 30)
+
+    art_y0 = y - 6
+    art_y1 = art_y0 + 170
+    draw.rectangle([art_x0, art_y0, right, art_y1], outline=NAVY, width=2)
+    cyclone(draw, art_x0 + art_w // 2, art_y0 + 76, 66, NAVY)
+    cap_w = draw.textlength(LEAD_CAPTION, font=CAPTION_FONT)
+    draw.text((art_x0 + (art_w - cap_w) / 2, art_y1 - 26),
+              LEAD_CAPTION, font=CAPTION_FONT, fill=NAVY)
+
+    lead_bottom = max(y + len(deck_lines) * 30, art_y1) + 14
+    rule(draw, MARGIN, lead_bottom, right, width=2)
+
+    # --- six story cards, two columns x three rows ---------------------
+    gap = 14
+    card_w = (WIDTH - 2 * MARGIN - gap) // 2
+    card_h = 116
+    top = lead_bottom + 14
+    for index, (kicker, headline) in enumerate(CARDS):
+        col = index % 2
+        row = index // 2
+        x0 = MARGIN + col * (card_w + gap)
+        y0 = top + row * (card_h + gap)
+        draw.rectangle([x0, y0, x0 + card_w, y0 + card_h],
+                       fill=CARD_BG, outline=(200, 194, 182), width=1)
+        draw.text((x0 + 14, y0 + 10), kicker, font=CARD_KICKER_FONT, fill=RED)
+        head = wrap(draw, headline, CARD_HEAD_FONT, card_w - 28)
+        draw_lines(draw, head[:3], CARD_HEAD_FONT, x0 + 14, y0 + 32, INK, 28)
+
+    cards_bottom = top + 3 * card_h + 2 * gap
+
+    # --- ticker ---------------------------------------------------------
+    # Two centred lines: the five briefs are too long for one line.
+    tick_y0 = cards_bottom + 14
+    tick_y1 = tick_y0 + 66
+    draw.rectangle([MARGIN, tick_y0, right, tick_y1], fill=NAVY)
+    tick_lines = ["  •  ".join(TICKER_ITEMS[:3]),
+                  "  •  ".join(TICKER_ITEMS[3:])]
+    tick_font = TICKER_FONT
+    for size in range(17, 12, -1):
+        tick_font = load_font("DejaVuSans-Bold.ttf", size)
+        widths = [draw.textlength(t, font=tick_font) for t in tick_lines]
+        if max(widths) <= right - MARGIN - 16:
+            break
+    line_y = tick_y0 + 10
+    for line in tick_lines:
+        line_w = draw.textlength(line, font=tick_font)
+        draw.text(((WIDTH - line_w) / 2, line_y),
+                  line, font=tick_font, fill=(255, 255, 255))
+        line_y += 26
+
+    # --- footer ---------------------------------------------------------
+    foot_y = tick_y1 + 14
+    rule(draw, MARGIN, foot_y, right, width=2)
+    foot_w = draw.textlength(FOOTER, font=FOOTER_FONT)
+    draw.text(((WIDTH - foot_w) / 2, foot_y + 10),
+              FOOTER, font=FOOTER_FONT, fill=GREY)
+
+    return img
 
 
 def main():
-    draw_page()
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "entry.png"), "wb") as f:
-        f.write(encode_png())
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    image = render()
+    image.save(OUT_PATH, format="PNG")
+    print(f"Wrote {OUT_PATH} ({WIDTH}x{HEIGHT})")
 
 
 if __name__ == "__main__":
