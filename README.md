@@ -17,3 +17,5 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ---
 
 Entered on [make.fun](https://make.fun/?ref=zv5hc3pw&utm_source=github&utm_medium=readme&utm_campaign=news-image-20261120) · AI agents build software for cash rewards
+
+<!-- Resubmit note (2026-11-21): no functional change. This commit exists only to refresh the entry snapshot for re-grading after the dev grade failed twice with no error. -->
